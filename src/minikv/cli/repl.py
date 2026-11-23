@@ -20,6 +20,9 @@ EXIT_COMMANDS = frozenset({"QUIT", "EXIT"})
 def render_help(registry: CommandRegistry, topic: str | None = None) -> str:
     """Build help text for all commands or for a single command.
 
+    The overview lists command names with a one-line summary; full usage
+    synopses are shown for a single ``topic`` to keep the overview narrow.
+
     Args:
         registry: Registry to describe.
         topic: Optional command name to describe in detail.
@@ -33,12 +36,12 @@ def render_help(registry: CommandRegistry, topic: str | None = None) -> str:
             return f"(error) ERR no help for unknown command '{topic}'"
         return f"{spec.usage}\n  {spec.summary}"
 
-    specs = list(registry)
-    width = max((len(spec.usage) for spec in specs), default=0)
-    lines = ["Available commands:"]
-    lines.extend(f"  {spec.usage:<{width}}  {spec.summary}" for spec in specs)
-    lines.append(f"  {'HELP [command]':<{width}}  Show this help or details for one command.")
-    lines.append(f"  {'QUIT | EXIT':<{width}}  Leave the shell.")
+    entries = [(spec.name, spec.summary) for spec in registry]
+    entries.append(("HELP", "Show this help, or usage with HELP <command>."))
+    entries.append(("QUIT", "Leave the shell (alias: EXIT)."))
+    width = max(len(name) for name, _ in entries)
+    lines = ["Available commands (type HELP <command> for usage):"]
+    lines.extend(f"  {name:<{width}}  {summary}" for name, summary in entries)
     return "\n".join(lines)
 
 

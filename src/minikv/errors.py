@@ -59,3 +59,18 @@ class CommandSyntaxError(CommandError):
 
     def __init__(self, message: str = "syntax error") -> None:
         super().__init__(message)
+
+
+class InvalidIntegerError(CommandError):
+    """Raised when an argument that must be a 64-bit integer is not one."""
+
+    def __init__(self) -> None:
+        super().__init__("value is not an integer or out of range")
+
+
+class InvalidExpireTimeError(CommandError):
+    """Raised when an expiry value is non-positive or would overflow."""
+
+    def __init__(self, command: str) -> None:
+        super().__init__(f"invalid expire time in '{command.lower()}' command")
+        self.command = command

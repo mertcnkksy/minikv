@@ -10,6 +10,7 @@ from minikv import Database
 from minikv.commands import CommandContext, CommandRegistry, CommandSpec, default_registry
 from minikv.errors import (
     CommandError,
+    CommandSyntaxError,
     MiniKVError,
     ParseError,
     UnknownCommandError,
@@ -53,11 +54,16 @@ def test_set_overwrites(db: Database) -> None:
 
 @pytest.mark.parametrize(
     "command",
-    [("SET",), ("SET", "k"), ("SET", "k", "v", "extra"), ("GET",), ("GET", "a", "b")],
+    [("SET",), ("SET", "k"), ("GET",), ("GET", "a", "b")],
 )
 def test_set_get_wrong_arity(db: Database, command: tuple[str, ...]) -> None:
     with pytest.raises(WrongArityError):
         db.execute(*command)
+
+
+def test_set_unknown_option_is_syntax_error(db: Database) -> None:
+    with pytest.raises(CommandSyntaxError):
+        db.execute("SET", "k", "v", "extra")
 
 
 # --- DEL / EXISTS -----------------------------------------------------------

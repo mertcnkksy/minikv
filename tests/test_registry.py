@@ -60,9 +60,12 @@ def test_duplicate_registration_fails() -> None:
 
 def test_default_registry_contents_and_order() -> None:
     registry = default_registry()
-    assert registry.names() == ["DEL", "EXISTS", "GET", "KEYS", "PING", "SET"]
+    assert registry.names() == [
+        "DEL", "EXISTS", "EXPIRE", "EXPIREAT", "EXPIRETIME", "GET", "KEYS", "PERSIST",
+        "PEXPIRE", "PEXPIREAT", "PEXPIRETIME", "PING", "PTTL", "SET", "TTL",
+    ]
     assert [spec.name for spec in registry] == registry.names()
-    assert len(registry) == 6
+    assert len(registry) == 15
 
 
 def test_default_registry_returns_independent_instances() -> None:

@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "A lightweight, Redis-inspired in-memory key-value database written in pure Python."
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "Mertcan" }]
+authors = [{ name = "Your Name" }]
 keywords = ["key-value", "database", "redis", "in-memory", "cache"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",

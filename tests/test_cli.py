@@ -47,6 +47,11 @@ def run_session(lines: Iterable[str | BaseException], database: Database | None 
     return output.getvalue()
 
 
+def test_ttl_session_output() -> None:
+    out = run_session(["SET k v EX 100", "TTL k", "TTL nope", "SET k v NX"])
+    assert out.splitlines()[:4] == ["OK", "(integer) 100", "(integer) -2", "(nil)"]
+
+
 def test_basic_session() -> None:
     out = run_session(["SET name Ada", "GET name", "GET nobody", "EXISTS name", "KEYS *"])
     assert out.splitlines() == ["OK", '"Ada"', "(nil)", "(integer) 1", '1) "name"', ""]
@@ -78,12 +83,14 @@ def test_keyboard_interrupt_does_not_exit() -> None:
 
 def test_help_lists_commands() -> None:
     out = run_session(["HELP"])
-    for usage in ("SET key value", "GET key", "DEL key [key ...]", "KEYS pattern", "QUIT | EXIT"):
-        assert usage in out
+    for name in ("SET", "GET", "DEL", "KEYS", "EXPIRE", "TTL", "PERSIST", "QUIT"):
+        assert f"  {name} " in out
+    assert max(len(line) for line in out.splitlines()) <= 100
 
 
 def test_help_for_single_command() -> None:
     assert run_session(["help get"]).splitlines()[0] == "GET key"
+    assert run_session(["HELP set"]).splitlines()[0].startswith("SET key value [NX|XX]")
 
 
 def test_help_for_unknown_command() -> None:

@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from minikv.errors import WrongArityError
+from minikv.clock import Clock
+from minikv.errors import InvalidIntegerError, WrongArityError
 from minikv.responses import Response
 from minikv.storage import StorageBackend
+from minikv.utils import parse_int64
 
 
 @dataclass(slots=True)
@@ -15,18 +17,36 @@ class CommandContext:
     """Runtime resources available to command handlers.
 
     Grouping dependencies in one object keeps handler signatures stable as
-    new subsystems are added in later phases (for example a clock for TTL,
-    a persistence log, or per-client connection state).
+    new subsystems are added (for example a persistence log or per-client
+    connection state).
 
     Attributes:
         storage: The storage backend holding the data.
+        clock: The time source; handlers must never call :mod:`time` directly.
     """
 
     storage: StorageBackend
+    clock: Clock
+
+    def now_ms(self) -> int:
+        """Return the current time in milliseconds since the Unix epoch."""
+        return self.clock.time_ms()
 
 
 type CommandHandler = Callable[[CommandContext, Sequence[str]], Response]
 """A handler receives the context and the arguments (without the command name)."""
+
+
+def require_int(text: str) -> int:
+    """Parse a command argument as a signed 64-bit integer.
+
+    Raises:
+        InvalidIntegerError: If ``text`` is not a valid integer.
+    """
+    value = parse_int64(text)
+    if value is None:
+        raise InvalidIntegerError()
+    return value
 
 
 @dataclass(frozen=True, slots=True)

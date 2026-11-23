@@ -5,7 +5,7 @@ Guidance for AI coding agents (and human contributors) working on MiniKV.
 ## Project Overview
 
 MiniKV is a Redis-inspired, in-memory key-value database written in pure Python 3.12.
-The current release is **v0.1.0 (Phase 1: core database engine)**.
+The current release is **v0.2.0 (Phase 2: key expiry)**.
 
 ## Setup and Commands
 
@@ -22,8 +22,9 @@ minikv                      # start the interactive shell (or: python -m minikv)
 - **Standard library only** at runtime. `pytest` is the only allowed development dependency.
   Do not add new dependencies without explicit approval from the maintainer.
 - **Python 3.12+.** Modern syntax (`type` aliases, `match`, `X | Y` unions) is welcome.
-- **Phase scope:** do not implement TCP networking, TTL/expiry, persistence, or Docker until the
+- **Phase scope:** do not implement TCP networking, persistence, or Docker until the
   corresponding roadmap phase is requested. Keep the architecture ready for them instead.
+- **Changelog:** every user-visible change gets an entry in `CHANGELOG.md`.
 - **Version** lives in one place: `src/minikv/__init__.py` (`__version__`). `pyproject.toml`
   reads it dynamically.
 
@@ -32,8 +33,9 @@ minikv                      # start the interactive shell (or: python -m minikv)
 | Layer       | Location                | Responsibility                                          | Must not            |
 |-------------|-------------------------|---------------------------------------------------------|---------------------|
 | Engine      | `engine.py`             | Dispatch tokens to command handlers                     | Print, read input, format output |
-| Commands    | `commands/`             | Validate arguments, implement behaviour                 | Access storage except via `CommandContext` |
-| Storage     | `storage/`              | Hold data behind `StorageBackend`, thread-safely        | Know about commands or replies |
+| Commands    | `commands/`             | Validate arguments, implement behaviour                 | Access storage or time except via `CommandContext` |
+| Storage     | `storage/`              | Hold data and expiry metadata, thread-safely            | Know about commands or replies |
+| Clock       | `clock.py`              | The only place that reads system time                   | Be bypassed with direct `time` calls |
 | Protocol    | `protocol/`             | Turn raw input into tokens (later: RESP encode/decode)  | Execute commands |
 | CLI         | `cli/`                  | Read lines, render responses and errors                 | Contain command logic |
 
@@ -41,17 +43,30 @@ minikv                      # start the interactive shell (or: python -m minikv)
   formatted text.
 - All deliberate errors derive from `MiniKVError` (see `errors.py`). Raise the most specific subclass.
   Error messages follow Redis wording where a Redis equivalent exists.
-- Dependencies flow downward: `cli → engine → commands → storage`. Never import the CLI from lower layers.
+- Dependencies flow downward: `cli → engine → commands → storage → clock`. Never import the CLI
+  from lower layers.
+
+## Expiry Rules
+
+- Expiry timestamps are absolute `int` milliseconds since the Unix epoch. Never use floats.
+- Read the current time with `ctx.now_ms()` in handlers and `self._clock.time_ms()` in storage.
+- Storage backends must hide expired keys from **every** read method (lazy expiration) and
+  implement `remove_expired()` for active expiration.
+- Integer arguments are parsed with `require_int()` so that error messages match Redis.
+- Expiry tests use the `clock` fixture (`ManualClock`) and `clock.advance(...)`. Never use
+  `time.sleep` in tests.
 
 ## Adding a New Command
 
-1. Write a handler `cmd_<name>(ctx: CommandContext, args: Sequence[str]) -> Response` in
-   `commands/builtin.py` (or a new module under `commands/` for a command family).
+1. Write a handler `cmd_<name>(ctx: CommandContext, args: Sequence[str]) -> Response` in the
+   matching module: `commands/builtin.py` for core key-value commands, `commands/expiry.py` for
+   expiry commands, or a new module under `commands/` for a new command family (then add its
+   tuple to `BUILTIN_COMMANDS` in `commands/__init__.py`).
 2. Add a `CommandSpec` with the correct Redis-style arity (count includes the command name;
    negative means "at least").
-3. Add tests in `tests/test_engine.py` covering success, edge cases, and wrong arity.
-4. Update the command tables in `README.md` and, if relevant, the expected names in
-   `tests/test_registry.py`.
+3. Add tests covering success, edge cases, invalid input, and wrong arity.
+4. Update the command tables in `README.md`, the expected names in `tests/test_registry.py`,
+   and `CHANGELOG.md`.
 
 ## Code Style
 
@@ -65,7 +80,7 @@ minikv                      # start the interactive shell (or: python -m minikv)
 
 - Every behaviour change ships with tests; bug fixes include a regression test.
 - Tests must be deterministic and fast (the whole suite should finish in seconds).
-- Use the `db` and `storage` fixtures from `tests/conftest.py`.
+- Use the `db`, `storage`, and `clock` fixtures from `tests/conftest.py`.
 - Test the CLI through `Repl` with injected input/output rather than real terminals.
 
 ## Commit Conventions
