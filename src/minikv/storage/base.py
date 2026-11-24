@@ -103,6 +103,27 @@ class StorageBackend(ABC):
             exist or had no expiry.
         """
 
+    @property
+    @abstractmethod
+    def dirty(self) -> int:
+        """Monotonic counter of explicit modifications.
+
+        Incremented by every write that changes the dataset (``set``,
+        deleting a live key, changing or removing an expiry, ``clear``).
+        Removing keys because they expired does **not** count, since replaying
+        absolute expiry times already reproduces those removals. Persistence
+        uses this counter to decide what to log and when to snapshot.
+        """
+
+    @abstractmethod
+    def items(self) -> list[tuple[str, str, int | None]]:
+        """Return a consistent snapshot of live keys.
+
+        Returns:
+            ``(key, value, expire_at)`` tuples, where ``expire_at`` is the
+            absolute expiry in milliseconds or ``None``.
+        """
+
     @abstractmethod
     def remove_expired(self) -> int:
         """Physically delete every key whose expiry time has passed.

@@ -175,14 +175,15 @@ def test_custom_storage_is_used() -> None:
 
 
 def test_custom_command_can_be_registered() -> None:
-    def cmd_dbsize(ctx: CommandContext, args: Sequence[str]) -> Response:
-        return len(ctx.storage)
+    def cmd_strlen(ctx: CommandContext, args: Sequence[str]) -> Response:
+        value = ctx.storage.get(args[0])
+        return 0 if value is None else len(value)
 
     registry = default_registry()
-    registry.register(CommandSpec("DBSIZE", cmd_dbsize, 1, "Count keys.", "DBSIZE"))
+    registry.register(CommandSpec("STRLEN", cmd_strlen, 2, "Value length.", "STRLEN key"))
     database = Database(registry=registry)
-    database.execute("SET", "a", "1")
-    assert database.execute("dbsize") == 1
+    database.execute("SET", "a", "hello")
+    assert database.execute("strlen", "a") == 5
 
 
 def test_empty_registry_knows_no_commands() -> None:

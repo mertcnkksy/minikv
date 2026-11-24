@@ -70,8 +70,10 @@ def _make_expire_handler(name: str, unit_ms: int, absolute: bool) -> CommandHand
 
         if expire_at <= now:
             ctx.storage.delete(key)
+            ctx.propagate_as(["DEL", key])
         else:
             ctx.storage.set_expiry(key, expire_at)
+            ctx.propagate_as(["PEXPIREAT", key, str(expire_at)])
         return 1
 
     handler.__name__ = f"cmd_{name.lower()}"

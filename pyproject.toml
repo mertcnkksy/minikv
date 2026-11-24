@@ -9,12 +9,15 @@ description = "A lightweight, Redis-inspired in-memory key-value database writte
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Your Name" }]
-keywords = ["key-value", "database", "redis", "in-memory", "cache"]
+keywords = ["key-value", "database", "redis", "resp", "asyncio", "in-memory", "cache"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
     "Topic :: Database :: Database Engines/Servers",
+    "Framework :: AsyncIO",
     "Typing :: Typed",
 ]
 dependencies = []

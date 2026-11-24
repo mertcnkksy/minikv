@@ -36,6 +36,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Future data files (snapshots, append-only logs)
-*.rdb
+# MiniKV data files (snapshots, append-only logs, temporary files)
+*.mkv
 *.aof
+*.rdb
+.*.tmp
+data/

@@ -74,3 +74,44 @@ class InvalidExpireTimeError(CommandError):
     def __init__(self, command: str) -> None:
         super().__init__(f"invalid expire time in '{command.lower()}' command")
         self.command = command
+
+
+class ProtocolError(MiniKVError):
+    """Raised when a client sends bytes that violate the RESP protocol.
+
+    A server must reply with this error and close the connection, because
+    the byte stream can no longer be trusted to be in sync.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"Protocol error: {detail}")
+        self.detail = detail
+
+
+class ReplyError(MiniKVError):
+    """An error reply received from a MiniKV (or Redis) server.
+
+    Args:
+        reply: The full error line without the leading ``-``,
+            e.g. ``"ERR unknown command 'FOO'"``.
+    """
+
+    def __init__(self, reply: str) -> None:
+        prefix, _, message = reply.partition(" ")
+        if not message:
+            prefix, message = "ERR", reply
+        super().__init__(message)
+        self.prefix = prefix
+
+
+class UnsupportedProtocolError(CommandError):
+    """Raised by ``HELLO`` when a client asks for a protocol version MiniKV lacks."""
+
+    prefix = "NOPROTO"
+
+    def __init__(self) -> None:
+        super().__init__("unsupported protocol version")
+
+
+class PersistenceError(MiniKVError):
+    """Raised when data cannot be saved to or loaded from disk."""

@@ -51,6 +51,7 @@ class InMemoryStorage(StorageBackend):
         self._data: dict[str, str] = {}
         self._expires: dict[str, int] = {}
         self._heap: list[tuple[int, str]] = []
+        self._dirty = 0
         self._lock = threading.RLock()
 
     # -- internal helpers (call with the lock held) ---------------------------
@@ -104,6 +105,7 @@ class InMemoryStorage(StorageBackend):
         with self._lock:
             self._expire_if_due(key)
             self._data[key] = value
+            self._dirty += 1
             if keep_ttl:
                 return
             if expire_at is None:
@@ -116,7 +118,9 @@ class InMemoryStorage(StorageBackend):
         with self._lock:
             self._expire_if_due(key)
             existed = key in self._data
-            self._remove(key)
+            if existed:
+                self._remove(key)
+                self._dirty += 1
             return existed
 
     def exists(self, key: str) -> bool:
@@ -132,6 +136,7 @@ class InMemoryStorage(StorageBackend):
 
     def clear(self) -> None:
         with self._lock:
+            self._dirty += len(self._data)
             self._data.clear()
             self._expires.clear()
             self._heap.clear()
@@ -155,13 +160,27 @@ class InMemoryStorage(StorageBackend):
             if key not in self._data:
                 return False
             self._track_expiry(key, expire_at)
+            self._dirty += 1
             return True
 
     def clear_expiry(self, key: str) -> bool:
         _require_str("key", key)
         with self._lock:
             self._expire_if_due(key)
-            return self._expires.pop(key, None) is not None
+            removed = self._expires.pop(key, None) is not None
+            if removed:
+                self._dirty += 1
+            return removed
+
+    @property
+    def dirty(self) -> int:
+        with self._lock:
+            return self._dirty
+
+    def items(self) -> list[tuple[str, str, int | None]]:
+        with self._lock:
+            self.remove_expired()
+            return [(key, value, self._expires.get(key)) for key, value in self._data.items()]
 
     def remove_expired(self) -> int:
         with self._lock:

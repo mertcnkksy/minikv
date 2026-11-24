@@ -168,6 +168,11 @@ class RequestParser:
         """Number of received bytes not yet consumed."""
         return len(self._buffer) - self._pos
 
+    @property
+    def has_partial(self) -> bool:
+        """Whether an incomplete request is pending (e.g. a truncated stream)."""
+        return self._args is not None or self.buffered > 0
+
     def feed(self, data: bytes) -> None:
         """Append newly received bytes to the internal buffer."""
         if self._pos:

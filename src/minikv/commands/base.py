@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Protocol
 
 from minikv.clock import Clock
 from minikv.errors import InvalidIntegerError, WrongArityError
@@ -12,25 +13,65 @@ from minikv.storage import StorageBackend
 from minikv.utils import parse_int64
 
 
+class PersistenceControl(Protocol):
+    """Operations that persistence commands (``SAVE``, ``BGSAVE``...) need."""
+
+    def save(self) -> None:
+        """Write a snapshot synchronously."""
+        ...
+
+    def background_save(self) -> None:
+        """Start writing a snapshot in the background."""
+        ...
+
+    def background_rewrite_aof(self) -> None:
+        """Start compacting the append-only file in the background."""
+        ...
+
+    def last_save_time(self) -> int:
+        """Return the Unix time (seconds) of the last successful snapshot."""
+        ...
+
+
 @dataclass(slots=True)
 class CommandContext:
     """Runtime resources available to command handlers.
 
     Grouping dependencies in one object keeps handler signatures stable as
-    new subsystems are added (for example a persistence log or per-client
-    connection state).
+    new subsystems are added (for example per-client connection state).
 
     Attributes:
         storage: The storage backend holding the data.
         clock: The time source; handlers must never call :mod:`time` directly.
+        persistence: Persistence controls, or ``None`` for a pure in-memory database.
     """
 
     storage: StorageBackend
     clock: Clock
+    persistence: PersistenceControl | None = None
+    _propagate: list[list[str]] | None = field(default=None, repr=False)
 
     def now_ms(self) -> int:
         """Return the current time in milliseconds since the Unix epoch."""
         return self.clock.time_ms()
+
+    def propagate_as(self, *commands: Sequence[str]) -> None:
+        """Record what should be written to the append-only log for this command.
+
+        By default a command that modified the dataset is logged verbatim.
+        Handlers whose effect depends on the current time (``EXPIRE``,
+        ``SET ... EX``) must call this with an equivalent, time-independent
+        form, so that replaying the log later reproduces the same state.
+        """
+        self._propagate = [list(command) for command in commands]
+
+    def reset_propagation(self) -> None:
+        """Forget any recorded propagation (called by the engine per command)."""
+        self._propagate = None
+
+    def propagation(self, default: Sequence[str]) -> list[list[str]]:
+        """Return the commands to log, falling back to ``default``."""
+        return self._propagate if self._propagate is not None else [list(default)]
 
 
 type CommandHandler = Callable[[CommandContext, Sequence[str]], Response]

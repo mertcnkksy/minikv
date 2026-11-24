@@ -12,13 +12,18 @@ import asyncio
 import contextlib
 import itertools
 import logging
-import signal
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from minikv import __version__
 from minikv.constants import DEFAULT_HOST, DEFAULT_PORT
 from minikv.engine import Database
+from minikv.errors import PersistenceError
 from minikv.server.connection import ClientConnection
+from minikv.server.shutdown import ShutdownSignals
+
+if TYPE_CHECKING:
+    from minikv.persistence import PersistenceManager
 
 logger = logging.getLogger("minikv.server")
 
@@ -33,8 +38,8 @@ class ServerConfig:
         host: Interface to bind to. Use ``"0.0.0.0"`` to accept remote clients.
         port: TCP port; ``0`` picks a free ephemeral port (useful in tests).
         max_clients: Maximum simultaneous connections.
-        expiry_interval: Seconds between background expiry cycles; ``0``
-            disables the cycle (keys still expire lazily).
+        expiry_interval: Seconds between background maintenance cycles (active
+            expiry, AOF fsync, automatic snapshots); ``0`` disables the cycle.
         read_size: Maximum bytes read from a socket at once.
     """
 
@@ -67,11 +72,24 @@ class MiniKVServer:
     Args:
         database: Database to serve. Defaults to a new, empty one.
         config: Server settings. Defaults to :class:`ServerConfig`.
+        persistence: Optional persistence manager for ``database``. The server
+            loads data before accepting clients, drives its periodic duties and
+            closes it on shutdown.
     """
 
-    def __init__(self, database: Database | None = None, config: ServerConfig | None = None) -> None:
+    def __init__(
+        self,
+        database: Database | None = None,
+        config: ServerConfig | None = None,
+        persistence: PersistenceManager | None = None,
+    ) -> None:
+        if persistence is not None and database is None:
+            database = persistence.database
         self.database = database if database is not None else Database()
+        if persistence is not None and persistence.database is not self.database:
+            raise ValueError("persistence manager belongs to a different database")
         self.config = config if config is not None else ServerConfig()
+        self.persistence = persistence
         self._server: asyncio.Server | None = None
         self._expiry_task: asyncio.Task[None] | None = None
         self._connections: dict[ClientConnection, asyncio.Task[None]] = {}
@@ -80,19 +98,29 @@ class MiniKVServer:
     # -- lifecycle ----------------------------------------------------------------
 
     async def start(self) -> None:
-        """Bind the listening socket and start background tasks.
+        """Load persisted data, bind the listening socket and start background tasks.
 
         Raises:
             RuntimeError: If the server is already running.
+            PersistenceError: If persisted data cannot be loaded.
             OSError: If the address cannot be bound (e.g. port in use).
         """
         if self._server is not None:
             raise RuntimeError("server is already running")
-        self._server = await asyncio.start_server(
-            self._handle_client, self.config.host, self.config.port
-        )
+        if self.persistence is not None:
+            # Like Redis, finish loading before accepting any client.
+            self.persistence.load()
+            self.persistence.start()
+        try:
+            self._server = await asyncio.start_server(
+                self._handle_client, self.config.host, self.config.port
+            )
+        except BaseException:
+            if self.persistence is not None:
+                self.persistence.close(final_save=False)
+            raise
         if self.config.expiry_interval > 0:
-            self._expiry_task = asyncio.create_task(self._expiry_cycle())
+            self._expiry_task = asyncio.create_task(self._cron())
         host, port = self.address
         logger.info("MiniKV %s ready to accept connections on %s:%d", __version__, host, port)
 
@@ -121,6 +149,8 @@ class MiniKVServer:
         if connections:
             await asyncio.wait([task for _, task in connections], timeout=5)
         await server.wait_closed()
+        if self.persistence is not None:
+            await asyncio.to_thread(self.persistence.close)
         logger.info("MiniKV server stopped")
 
     async def __aenter__(self) -> MiniKVServer:
@@ -178,52 +208,73 @@ class MiniKVServer:
         finally:
             self._connections.pop(connection, None)
 
-    async def _expiry_cycle(self) -> None:
-        """Periodically purge expired keys, like Redis' ``serverCron``."""
+    async def _cron(self) -> None:
+        """Periodic maintenance, like Redis' ``serverCron``.
+
+        Purges expired keys and runs persistence duties (AOF fsync, automatic
+        snapshots and rewrites).
+        """
         while True:
             await asyncio.sleep(self.config.expiry_interval)
             try:
-                removed = self.database.storage.remove_expired()
-            except Exception:  # pragma: no cover - defensive; keep the cycle alive
-                logger.exception("active expiry cycle failed")
-            else:
+                with self.database.lock:
+                    removed = self.database.storage.remove_expired()
                 if removed:
                     logger.debug("active expiry removed %d key(s)", removed)
+                if self.persistence is not None:
+                    self.persistence.cron()
+            except Exception:  # pragma: no cover - defensive; keep the cycle alive
+                logger.exception("maintenance cycle failed")
 
 
-def run_server(config: ServerConfig | None = None, database: Database | None = None) -> int:
-    """Run a server in the foreground until SIGINT or SIGTERM.
+def run_server(
+    config: ServerConfig | None = None,
+    database: Database | None = None,
+    persistence: PersistenceManager | None = None,
+) -> int:
+    """Run a server in the foreground until a graceful shutdown is requested.
+
+    Shutdown requests are ``SIGINT``/``SIGTERM`` on Unix and Ctrl+C/Ctrl+Break
+    (``SIGINT``/``SIGBREAK``) on Windows; see :mod:`minikv.server.shutdown`.
+    On shutdown the server stops accepting clients, closes connections, then
+    flushes persistence: the append-only file is fsynced and, when save rules
+    are configured, a final snapshot is written.
 
     Args:
         config: Server settings.
         database: Database to serve.
+        persistence: Optional persistence manager for the database.
 
     Returns:
         A process exit code: ``0`` after a clean shutdown, ``1`` if the
-        server could not start.
+        server could not start or if flushing data during shutdown failed.
     """
 
     async def _main() -> int:
-        server = MiniKVServer(database, config)
-        try:
-            await server.start()
-        except OSError as exc:
-            logger.error("could not start server: %s", exc)
-            return 1
+        # Install handlers before starting, so a request that arrives while
+        # data is loading or the socket is opening is not lost.
+        with ShutdownSignals() as shutdown:
+            server = MiniKVServer(database, config, persistence)
+            try:
+                await server.start()
+            except (OSError, PersistenceError) as exc:
+                logger.error("could not start server: %s", exc)
+                return 1
 
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
-                loop.add_signal_handler(sig, stop.set)
-        try:
-            await stop.wait()
-            logger.info("shutdown signal received")
-        finally:
-            await server.stop()
-        return 0
+            exit_code = 0
+            try:
+                received = await shutdown.wait()
+                logger.info("shutdown signal received (%s), shutting down gracefully", received.name)
+            finally:
+                try:
+                    await server.stop()
+                except Exception:
+                    logger.exception("error while shutting down; data may not be fully saved")
+                    exit_code = 1
+            return exit_code
 
     try:
         return asyncio.run(_main())
-    except KeyboardInterrupt:  # platforms without loop signal handlers (Windows)
+    except KeyboardInterrupt:  # interrupted before the handlers were installed
+        logger.warning("interrupted before the server started")
         return 0

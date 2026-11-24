@@ -104,6 +104,13 @@ def cmd_set(ctx: CommandContext, args: Sequence[str]) -> Response:
         if (options.condition == "NX") == exists:
             return None
     ctx.storage.set(key, value, options.expire_at, keep_ttl=options.keep_ttl)
+    # Log a time-independent form: absolute expiry, and no NX/XX (already applied).
+    canonical = ["SET", key, value]
+    if options.expire_at is not None:
+        canonical += ["PXAT", str(options.expire_at)]
+    elif options.keep_ttl:
+        canonical.append("KEEPTTL")
+    ctx.propagate_as(canonical)
     return OK
 
 
