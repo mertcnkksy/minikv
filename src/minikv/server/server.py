@@ -20,6 +20,7 @@ from minikv.constants import DEFAULT_HOST, DEFAULT_PORT
 from minikv.engine import Database
 from minikv.errors import PersistenceError
 from minikv.server.connection import ClientConnection
+from minikv.server.group_commit import GroupCommitter
 from minikv.server.shutdown import ShutdownSignals
 
 if TYPE_CHECKING:
@@ -41,6 +42,9 @@ class ServerConfig:
         expiry_interval: Seconds between background maintenance cycles (active
             expiry, AOF fsync, automatic snapshots); ``0`` disables the cycle.
         read_size: Maximum bytes read from a socket at once.
+        group_commit: Share one AOF flush/fsync among all writes executed in
+            an event-loop pass, sending replies only after it completes.
+            Disable only to measure its effect.
     """
 
     host: str = DEFAULT_HOST
@@ -48,6 +52,7 @@ class ServerConfig:
     max_clients: int = 10_000
     expiry_interval: float = 0.1
     read_size: int = 64 * 1024
+    group_commit: bool = True
 
     def __post_init__(self) -> None:
         if not 0 <= self.port <= 65_535:
@@ -93,6 +98,7 @@ class MiniKVServer:
         self._server: asyncio.Server | None = None
         self._expiry_task: asyncio.Task[None] | None = None
         self._connections: dict[ClientConnection, asyncio.Task[None]] = {}
+        self._committer: GroupCommitter | None = None
         self._ids = itertools.count(1)
 
     # -- lifecycle ----------------------------------------------------------------
@@ -110,7 +116,10 @@ class MiniKVServer:
         if self.persistence is not None:
             # Like Redis, finish loading before accepting any client.
             self.persistence.load()
-            self.persistence.start()
+            self.persistence.start(group_commit=self.config.group_commit)
+            if self.config.group_commit:
+                manager = self.persistence
+                self._committer = GroupCommitter(lambda: manager.needs_commit, manager.commit)
         try:
             self._server = await asyncio.start_server(
                 self._handle_client, self.config.host, self.config.port
@@ -180,6 +189,11 @@ class MiniKVServer:
         return sockname[0], sockname[1]
 
     @property
+    def group_commits(self) -> int:
+        """Number of group commits performed so far (``0`` without persistence)."""
+        return self._committer.commits if self._committer is not None else 0
+
+    @property
     def client_count(self) -> int:
         """Number of currently connected clients."""
         return len(self._connections)
@@ -198,7 +212,12 @@ class MiniKVServer:
             return
 
         connection = ClientConnection(
-            self.database, reader, writer, next(self._ids), read_size=self.config.read_size
+            self.database,
+            reader,
+            writer,
+            next(self._ids),
+            read_size=self.config.read_size,
+            committer=self._committer,
         )
         task = asyncio.current_task()
         assert task is not None

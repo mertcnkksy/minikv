@@ -5,7 +5,7 @@ Guidance for AI coding agents (and human contributors) working on MiniKV.
 ## Project Overview
 
 MiniKV is a Redis-inspired, in-memory key-value database written in pure Python 3.12.
-The current release is **v0.5.0**; all five roadmap phases are complete.
+The current release is **v0.6.0** (group commit). The roadmap in `README.md` lists the next versions.
 
 ## Setup and Commands
 
@@ -65,6 +65,11 @@ python benchmarks/run_benchmarks.py --requests 5000
 - Never write a data file in place: use `atomic_write()` or a temporary file plus `os.replace`.
 - Snapshot format changes require bumping `FORMAT_VERSION` and keeping old versions readable.
 - Background jobs take their copy of the data while holding `database.lock`.
+- **Never send a reply before the writes it acknowledges are durable.** In the server, every
+  reply goes through `ClientConnection._wait_durable()` (group commit). New reply paths must do
+  the same, and a failed commit must close the connection rather than acknowledge.
+- `AppendOnlyFile(deferred=True)` is only for callers that call `commit()` before acknowledging;
+  the embedded default (`deferred=False`) must keep syncing every write under `always`.
 - Tests that touch disk use `tmp_path`; nothing may be written to the working directory.
 
 ## Server and Protocol Rules
@@ -140,6 +145,9 @@ python benchmarks/run_benchmarks.py --requests 5000
   remove a matrix entry or mark a job `continue-on-error` to hide a failure.
 - Validate changes with `actionlint` (workflow), `hadolint` (Dockerfile) and `shellcheck`
   (scripts) when they are available.
+- Version strings outside `src/minikv/__init__.py` (Dockerfile label, Compose image tag,
+  CHANGELOG heading, README status) are checked by `tests/test_project_metadata.py`; update them
+  together when releasing.
 - Performance figures in the README must state how they were measured (tool, requests,
   clients, pipeline, environment) and be described as indicative.
 - Benchmark code must not require tools beyond the standard library and MiniKV.

@@ -150,18 +150,25 @@ class PersistenceManager:
             self._dirty_at_last_save = self.database.storage.dirty
         return source
 
-    def start(self) -> None:
+    def start(self, *, group_commit: bool = False) -> None:
         """Begin logging writes and enable the persistence commands.
 
         When the append-only file is enabled but missing, it is first
         created from the current dataset, so data loaded from a snapshot is
         not lost on the next restart.
+
+        Args:
+            group_commit: Defer AOF flushing and the ``always`` fsync until
+                :meth:`commit`. Only for callers that commit before
+                acknowledging writes, such as the server.
         """
         if self._started:
             raise RuntimeError("persistence is already started")
         self.config.directory.mkdir(parents=True, exist_ok=True)
         if self.config.aof_enabled:
-            self._aof = AppendOnlyFile(self.config.aof_path, self.config.aof_fsync)
+            self._aof = AppendOnlyFile(
+                self.config.aof_path, self.config.aof_fsync, deferred=group_commit
+            )
             if not self.config.aof_path.exists():
                 self._write_base_aof()
             self._aof.open()
@@ -204,6 +211,20 @@ class PersistenceManager:
     def aof(self) -> AppendOnlyFile | None:
         """The append-only file, when enabled and started."""
         return self._aof
+
+    @property
+    def needs_commit(self) -> bool:
+        """Whether group-committed writes are waiting for :meth:`commit`."""
+        return self._aof is not None and self._aof.needs_commit
+
+    def commit(self) -> None:
+        """Make group-committed writes durable (see :meth:`AppendOnlyFile.commit`).
+
+        Raises:
+            PersistenceError: If the append-only file cannot be synced.
+        """
+        if self._aof is not None:
+            self._aof.commit()
 
     @property
     def save_in_progress(self) -> bool:

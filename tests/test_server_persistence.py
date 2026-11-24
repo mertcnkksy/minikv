@@ -106,8 +106,12 @@ def _stop(process: subprocess.Popen[str]) -> str:
 
 @pytest.mark.parametrize(
     "options",
-    [["--appendonly", "--save", ""], ["--save", "3600 1"]],
-    ids=["aof", "snapshot"],
+    [
+        ["--appendonly", "--save", ""],
+        ["--save", "3600 1"],
+        ["--appendonly", "--appendfsync", "always", "--save", ""],
+    ],
+    ids=["aof", "snapshot", "aof-always-group-commit"],
 )
 def test_real_process_restart_keeps_data(tmp_path: Path, options: list[str]) -> None:
     port = free_port()

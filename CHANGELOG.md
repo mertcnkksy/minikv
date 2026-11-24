@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - Group Commit
+
+### Added
+
+- Group commit in the server: all writes executed in one event-loop pass share a single
+  AOF flush and, under `appendfsync always`, a single `fsync`; replies are sent only after
+  it completes. Measured with `redis-benchmark` (20 clients, `always`): `SET` without
+  pipelining 5,563 → 16,992 req/s (3.1×), with a pipeline of 16 4,699 → 54,645 req/s (11.6×).
+- `minikv.server.group_commit.GroupCommitter`.
+- Deferred mode for `AppendOnlyFile` (`deferred=True`, `needs_commit`, `commit()`) and
+  `PersistenceManager.start(group_commit=...)`, `needs_commit` and `commit()`.
+- `ServerConfig.group_commit` (default `True`) and `MiniKVServer.group_commits`.
+- Tests proving that no reply is sent before its write is fsynced, that a failed commit
+  closes the connection without acknowledging, and that concurrent clients share fsyncs.
+- Tests keeping the Dockerfile label, Compose image tag, CHANGELOG and README in sync with
+  the package version.
+
+### Changed
+
+- If the server cannot make writes durable, it now closes the affected connections without
+  replying instead of acknowledging them.
+- The embedded library (`PersistenceManager.start()` without `group_commit`) keeps its
+  previous behaviour of flushing every write and fsyncing each one under `always`.
+
 ## [0.5.0] - Phase 5: Docker, CI and Benchmarks
 
 ### Added

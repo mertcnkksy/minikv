@@ -10,6 +10,7 @@ from minikv.engine import Database
 from minikv.errors import MiniKVError, ProtocolError
 from minikv.protocol import RequestParser, encode_error, encode_response
 from minikv.responses import OK
+from minikv.server.group_commit import GroupCommitter
 
 logger = logging.getLogger("minikv.server")
 
@@ -21,6 +22,11 @@ class ClientConnection:
     executed before replies are written back in a single ``write`` call.
     This gives pipelined clients the throughput benefit they expect.
 
+    With a :class:`~minikv.server.group_commit.GroupCommitter`, replies are
+    held back until the writes they acknowledge are durable. If that fails,
+    the connection is closed without replying, so the client never receives
+    an acknowledgement for data that may not be on disk.
+
     The class is the natural home for per-client state in later phases
     (selected database, transactions, subscriptions).
 
@@ -30,6 +36,7 @@ class ClientConnection:
         writer: The stream writer for the socket.
         client_id: A unique, increasing identifier used in logs.
         read_size: Maximum bytes read from the socket at once.
+        committer: Group committer to wait on before sending replies.
     """
 
     def __init__(
@@ -40,6 +47,7 @@ class ClientConnection:
         client_id: int,
         *,
         read_size: int = 64 * 1024,
+        committer: GroupCommitter | None = None,
     ) -> None:
         self.client_id = client_id
         self.peer: str = _format_peer(writer.get_extra_info("peername"))
@@ -48,6 +56,7 @@ class ClientConnection:
         self._writer = writer
         self._read_size = read_size
         self._parser = RequestParser()
+        self._committer = committer
 
     async def run(self) -> None:
         """Process requests until the connection ends. Never raises I/O errors."""
@@ -58,6 +67,8 @@ class ClientConnection:
                 if not data:
                     break
                 replies, close_after = self._process(data)
+                if replies and not await self._wait_durable():
+                    break
                 if replies:
                     self._writer.write(replies)
                     await self._writer.drain()
@@ -68,6 +79,22 @@ class ClientConnection:
         finally:
             await self.close()
             logger.debug("client #%d disconnected", self.client_id)
+
+    async def _wait_durable(self) -> bool:
+        """Wait for the group commit; ``False`` if the data could not be made durable."""
+        if self._committer is None:
+            return True
+        try:
+            await self._committer.wait_durable()
+        except Exception as exc:
+            logger.critical(
+                "client #%d: writes could not be made durable (%s); "
+                "closing the connection without acknowledging them",
+                self.client_id,
+                exc,
+            )
+            return False
+        return True
 
     async def close(self) -> None:
         """Close the underlying socket (idempotent)."""

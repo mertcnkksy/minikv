@@ -10,13 +10,15 @@ It speaks the Redis protocol (RESP2), so `redis-cli`, `redis-benchmark`, and Red
 can talk to it directly, and it persists data to disk with snapshots and an append-only file. It is built as a learning-oriented yet production-minded project: a small
 core with clean module boundaries, full type hints, and a thorough test suite.
 
-> **Status:** `v0.5.0` — all five roadmap phases complete. A learning project; not intended for production use.
+> **Status:** `v0.6.0` — group commit for the append-only file. A learning project; not intended for production use.
 
 ## Features
 
 - **Redis-compatible TCP server** built on `asyncio`, speaking RESP2 with pipelining support
 - **Durable storage:** checksummed binary snapshots and an append-only file (AOF) with
   `always` / `everysec` / `no` fsync policies, background saves, and background AOF compaction
+- **Group commit:** with `appendfsync always`, all writes executed in one event-loop pass share a
+  single `fsync`, and replies are sent only after it — up to 11× faster with the same guarantee
 - **Works with official Redis tooling:** `redis-cli`, `redis-benchmark`, `redis-py`, and plain `telnet`/`nc`
 - **Binary-safe values** over the network
 - **Key expiry (TTL)** with Redis 7 semantics, lazy + active expiration, and a background expiry cycle
@@ -262,14 +264,16 @@ format clients use, so you can read it with any text editor. With the default `e
 most about one second of writes can be lost on a power failure; a crash of the MiniKV process alone
 never loses an acknowledged write.
 
-| `--appendfsync` | Durability                                  | Measured `SET` throughput* |
-|-----------------|---------------------------------------------|----------------------------|
-| (AOF off)       | Snapshots only                              | ~45,000 req/s              |
-| `no`            | The OS decides when to flush                | —                          |
-| `everysec`      | At most ~1 s of writes lost on power loss   | ~36,000 req/s              |
-| `always`        | Every write is on disk before the reply     | ~5,700 req/s               |
+| `--appendfsync` | Durability                                  | `SET`, no pipeline* | `SET`, pipeline 16* |
+|-----------------|---------------------------------------------|--------------------:|--------------------:|
+| (AOF off)       | Snapshots only                              | ~34,000 req/s       | ~81,000 req/s       |
+| `no`            | The OS decides when to flush                | —                   | —                   |
+| `everysec`      | At most ~1 s of writes lost on power loss   | ~25,000 req/s       | ~63,000 req/s       |
+| `always`        | Every write is on disk before the reply     | ~17,000 req/s       | ~55,000 req/s       |
 
-\* `redis-benchmark -t set -n 20000 -c 20` in a small container; indicative only.
+\* MiniKV 0.6.0, `redis-benchmark -t set -n 20000 -c 20`, best of three runs, in a small container
+whose `fsync` takes ~0.15 ms; indicative only. See [Group commit](#group-commit) for the effect of
+batching on `always`.
 
 On startup the AOF is loaded when it is enabled and exists, because it is the more complete
 record; otherwise the snapshot is used. Turning AOF on for an existing snapshot-only dataset is
@@ -285,6 +289,8 @@ safe: the log is first created from the loaded data.
   Replaying the log a week later therefore reproduces exactly the right expiry times.
 - **Ordered logging.** Executing a command and logging it happen under one lock, so the log order
   always matches the execution order.
+- **Group commit.** The server shares one flush (and, under `always`, one `fsync`) among all writes
+  executed in an event-loop pass and holds every reply until it completes. See below.
 - **Point-in-time background jobs.** `BGSAVE` and `BGREWRITEAOF` copy the dataset under the lock
   (cheap: references to immutable strings) and write it from a background thread, so clients keep
   being served.
@@ -296,6 +302,38 @@ safe: the log is first created from the loaded data.
   corrupted. If the last AOF command was cut off by a crash, it is dropped and the file is truncated
   to the last complete command (like Redis' `aof-load-truncated yes`); corruption elsewhere stops the
   server instead of silently losing data.
+
+### Group commit
+
+With `appendfsync always` an acknowledged write must already be on disk. Syncing after each command
+costs one `fsync` per write, so neither pipelining nor concurrent clients help. Since v0.6.0 the
+server works like Redis instead:
+
+1. Each connection executes all commands that arrived in one read; the AOF only buffers them.
+2. The first connection with pending writes schedules a single commit with `loop.call_soon`. Every
+   connection served before that callback runs joins it — including other clients.
+3. The commit flushes the buffer and fsyncs once; only then are all held replies sent.
+
+```text
+client A ── SET ─┐                                  ┌─▶ +OK
+client B ── SET ─┼─▶ execute ─▶ buffer ─▶ 1 fsync ─┼─▶ +OK
+client C ── GET ─┘                                  └─▶ "v"   (reads wait too: no one sees
+                                                                  a write before it is durable)
+```
+
+If the commit fails, affected connections are closed without a reply, so no client ever receives an
+acknowledgement for data that may not be on disk. The embedded library (no server) keeps syncing
+after every write, because there is no reply to hold back. Measured with `redis-benchmark`
+(20 clients, best of three runs, `appendfsync always`):
+
+| Workload             | v0.5.0 (fsync per write) | v0.6.0 (group commit) | Speed-up |
+|----------------------|-------------------------:|----------------------:|---------:|
+| `SET`, no pipelining | 5,563 req/s              | 16,992 req/s          | **3.1×** |
+| `SET`, pipeline 16   | 4,699 req/s              | 54,645 req/s          | **11.6×** |
+
+Even without pipelining, concurrent clients share fsyncs: in the test suite, 20 clients writing 400
+keys trigger about 40–60 fsyncs instead of 400. The `fsync` in the measurement environment is fast
+(~0.15 ms); on a typical SSD (0.5–5 ms) or hard disk (~10 ms) the gain is larger.
 
 Snapshot file format (big-endian):
 
@@ -409,6 +447,7 @@ src/minikv/
 ├── server/
 │   ├── server.py        # MiniKVServer, ServerConfig, run_server
 │   ├── connection.py    # Per-client read/execute/write loop
+│   ├── group_commit.py  # One shared AOF commit per event-loop pass
 │   └── shutdown.py      # Cross-platform graceful shutdown signals
 ├── cli/
 │   ├── app.py           # `minikv`, `minikv serve`, `minikv connect`
@@ -466,7 +505,8 @@ TTL changes are skipped and periodically compacted.
 All numbers below are indicative: they were measured on CPython 3.12 inside a small container,
 and real Redis is far faster. Use them to compare MiniKV configurations, not as absolute figures.
 
-**Server capacity**, measured with `redis-benchmark` (a C client), persistence disabled, 20 clients:
+**Server capacity**, measured with `redis-benchmark` (a C client), persistence disabled, 20 clients
+(MiniKV 0.3.0):
 
 | Test | No pipelining | Pipeline of 16 |
 |------|---------------|----------------|
@@ -496,12 +536,13 @@ GET     20,000       10         1  29,299   0.338   0.472   0.530   1.248       
 
 | Mode           | SET, no pipeline | SET, pipeline 16 | GET, no pipeline |
 |----------------|-----------------:|-----------------:|-----------------:|
-| In memory      | ~24,000 req/s    | ~63,000 req/s    | ~25,000 req/s    |
-| AOF `everysec` | ~17,000 req/s    | ~36,000 req/s    | ~26,000 req/s    |
-| AOF `always`   | ~4,000 req/s     | ~5,000 req/s     | ~23,000 req/s    |
+| In memory      | ~23,000 req/s    | ~50,000 req/s    | ~24,000 req/s    |
+| AOF `everysec` | ~17,000 req/s    | ~48,000 req/s    | ~23,000 req/s    |
+| AOF `always`   | ~9,000 req/s     | ~43,000 req/s    | ~23,000 req/s    |
 
-Reads cost the same in every mode because they are never logged. Writes pay for durability, and
-with `always` pipelining barely helps: see [Known Limitations](#known-limitations).
+MiniKV 0.6.0. Reads cost the same in every mode because they are never logged. Thanks to group
+commit, pipelined writes under `always` are now within reach of the other modes (in 0.5.0 the same
+row read ~4,000 and ~5,000 req/s).
 
 ```bash
 python benchmarks/run_benchmarks.py --requests 20000 --pipelines 1,16 --output results.md
@@ -543,18 +584,23 @@ for release history.
 | 3     | 0.3.0   | ✅ TCP server speaking RESP2, compatible with `redis-cli`       |
 | 4     | 0.4.0   | ✅ Persistence: snapshots and append-only file                  |
 | 5     | 0.5.0   | ✅ Docker image, CI pipeline, benchmarks                        |
+| 6     | 0.6.0   | ✅ Group commit for the append-only file                        |
+| 7     | 0.7.0   | Hash, List and Set data types                                  |
+| 8     | 0.8.0   | Memory limit (`maxmemory`) with LRU/LFU eviction               |
+| 9     | 0.9.0   | Authentication, protected mode and TLS                         |
+| 10    | 1.0.0   | Stable API, performance report against Redis, full documentation |
 
 ## Known Limitations
 
-- If a disk write fails after a command was applied in memory, the client receives an error but the
-  in-memory change stays; the log and memory can diverge until the next successful rewrite.
+- If a disk write fails after a command was applied in memory, the client never receives a success
+  reply (it gets an error, or its connection is closed under group commit), but the in-memory change
+  stays; the log and memory can diverge until the next successful rewrite.
 - Background jobs copy the list of keys and values, briefly holding the lock and temporarily using
   extra memory proportional to the number of keys. Redis avoids this with `fork()` and copy-on-write.
 - Snapshots are read fully into memory when loading, and `KEYS` scans the whole keyspace.
 - Python's GIL means background threads share the CPU with the event loop.
-- With `--appendfsync always`, MiniKV fsyncs after every write command. Redis groups the writes
-  of one event-loop iteration into a single fsync ("group commit"), so pipelined writes are much
-  cheaper there; the benchmark above shows the cost of not doing so.
+- The group-commit `fsync` runs on the event-loop thread, so all clients pause while it runs, as in
+  Redis. With a very slow disk, `everysec` remains the better trade-off.
 
 ## Contributing
 

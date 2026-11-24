@@ -15,6 +15,16 @@ Durability is controlled by the fsync policy, mirroring Redis' ``appendfsync``:
 
 In every mode data reaches the OS before the client gets its reply, so a
 crash of the MiniKV process alone never loses acknowledged writes.
+
+Group commit
+------------
+By default every append is flushed to the OS immediately and, under
+``always``, fsynced on its own. A server can instead enable *deferred*
+mode: appends stay in the process buffer until :meth:`AppendOnlyFile.commit`
+flushes them (and fsyncs once under ``always``). The server commits after
+executing all commands that arrived in one event-loop pass and only then
+sends their replies, so many writes share one fsync without weakening the
+guarantee that an acknowledged write is on disk.
 """
 
 from __future__ import annotations
@@ -57,6 +67,9 @@ class AppendOnlyFile:
     Args:
         path: The log file.
         fsync_policy: Durability policy.
+        deferred: Group-commit mode: defer flushing (and the ``always`` fsync)
+            until :meth:`commit`. The caller must commit before acknowledging
+            the writes.
         monotonic: Time source for the ``everysec`` policy (injectable for tests).
     """
 
@@ -65,16 +78,19 @@ class AppendOnlyFile:
         path: Path,
         fsync_policy: FsyncPolicy = FsyncPolicy.EVERYSEC,
         *,
+        deferred: bool = False,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.path = path
         self.fsync_policy = FsyncPolicy(fsync_policy)
+        self.deferred = deferred
         self._monotonic = monotonic
         self._file: BinaryIO | None = None
         self._lock = threading.Lock()
         self._rewrite_buffer: list[bytes] | None = None
         self._last_fsync = 0.0
         self._unsynced = False
+        self._unflushed = False
 
     # -- lifecycle --------------------------------------------------------------
 
@@ -121,16 +137,52 @@ class AppendOnlyFile:
                 raise PersistenceError("append-only file is not open")
             try:
                 self._file.write(data)
-                self._file.flush()
                 self._unsynced = True
                 if self._rewrite_buffer is not None:
                     self._rewrite_buffer.append(data)
+                if self.deferred:
+                    self._unflushed = True  # commit() flushes and, if needed, fsyncs
+                    if self.fsync_policy is FsyncPolicy.EVERYSEC:
+                        self._fsync_if_due_locked()
+                    return
+                self._file.flush()
                 if self.fsync_policy is FsyncPolicy.ALWAYS:
                     self._fsync_locked()
                 elif self.fsync_policy is FsyncPolicy.EVERYSEC:
                     self._fsync_if_due_locked()
             except OSError as exc:
                 raise PersistenceError(f"cannot write append-only file: {exc}") from exc
+
+    @property
+    def needs_commit(self) -> bool:
+        """Whether deferred writes are waiting for :meth:`commit`."""
+        with self._lock:
+            if self._file is None or not self.deferred:
+                return False
+            return self._unflushed or (
+                self.fsync_policy is FsyncPolicy.ALWAYS and self._unsynced
+            )
+
+    def commit(self) -> None:
+        """Make deferred writes as durable as the fsync policy promises.
+
+        Flushes buffered appends to the OS and, under ``always``, fsyncs once
+        for all of them. Cheap when nothing is pending.
+
+        Raises:
+            PersistenceError: If flushing or fsyncing fails.
+        """
+        with self._lock:
+            if self._file is None:
+                return
+            try:
+                if self._unflushed:
+                    self._file.flush()
+                    self._unflushed = False
+                if self.fsync_policy is FsyncPolicy.ALWAYS:
+                    self._fsync_locked()
+            except OSError as exc:
+                raise PersistenceError(f"cannot sync append-only file: {exc}") from exc
 
     def sync_if_due(self) -> None:
         """Apply the ``everysec`` policy; called periodically by the server."""
@@ -148,6 +200,7 @@ class AppendOnlyFile:
         if self._file is None or not self._unsynced:
             return
         self._file.flush()
+        self._unflushed = False
         os.fsync(self._file.fileno())
         self._last_fsync = self._monotonic()
         self._unsynced = False
@@ -191,6 +244,7 @@ class AppendOnlyFile:
             if was_open:
                 self._file = open(self.path, "ab")
                 self._unsynced = False
+                self._unflushed = False
                 self._last_fsync = self._monotonic()
 
 

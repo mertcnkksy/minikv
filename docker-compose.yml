@@ -3,7 +3,7 @@
 services:
   minikv:
     build: .
-    image: minikv:0.5.0
+    image: minikv:0.6.0
     container_name: minikv
     ports:
       - "6380:6380"

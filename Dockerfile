@@ -38,7 +38,7 @@ FROM ${PYTHON_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.title="MiniKV" \
       org.opencontainers.image.description="A Redis-inspired key-value database in pure Python" \
-      org.opencontainers.image.version="0.5.0"
+      org.opencontainers.image.version="0.6.0"
 
 ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
