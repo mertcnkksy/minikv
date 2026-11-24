@@ -5,7 +5,7 @@ Guidance for AI coding agents (and human contributors) working on MiniKV.
 ## Project Overview
 
 MiniKV is a Redis-inspired, in-memory key-value database written in pure Python 3.12.
-The current release is **v0.4.0 (Phase 4: persistence)**.
+The current release is **v0.5.0**; all five roadmap phases are complete.
 
 ## Setup and Commands
 
@@ -18,6 +18,9 @@ minikv                      # embedded interactive shell (or: python -m minikv)
 minikv serve                # TCP server on 127.0.0.1:6380 (snapshots in the current dir)
 minikv serve --dir data --appendonly --save ""   # AOF only, data in ./data
 minikv connect              # shell connected to the server
+minikv benchmark            # throughput and latency of a running server
+docker build -t minikv . && bash scripts/docker_smoke_test.sh minikv
+python benchmarks/run_benchmarks.py --requests 5000
 ```
 
 ## Hard Constraints
@@ -25,8 +28,8 @@ minikv connect              # shell connected to the server
 - **Standard library only** at runtime. `pytest` is the only allowed development dependency.
   Do not add new dependencies without explicit approval from the maintainer.
 - **Python 3.12+.** Modern syntax (`type` aliases, `match`, `X | Y` unions) is welcome.
-- **Phase scope:** do not implement Docker, CI or benchmark tooling until the corresponding
-  roadmap phase is requested. Keep the architecture ready for them instead.
+- **Scope:** the roadmap is complete. Propose new features or behaviour changes to the
+  maintainer before implementing them. Keep the architecture ready for them instead.
 - **Changelog:** every user-visible change gets an entry in `CHANGELOG.md`.
 - **Version** lives in one place: `src/minikv/__init__.py` (`__version__`). `pyproject.toml`
   reads it dynamically.
@@ -127,6 +130,19 @@ minikv connect              # shell connected to the server
 - Optional third-party tools (`redis-py`, `redis-cli`) may be used in tests only behind
   `pytest.importorskip` / `skipif`, never as required dependencies.
 - Test the CLI through `Repl` with injected input/output rather than real terminals.
+
+## Docker, CI and Benchmark Rules
+
+- The image must stay dependency-free, run as the unprivileged `minikv` user, keep data in
+  `/data`, and shut down gracefully on `SIGTERM`. Run `scripts/docker_smoke_test.sh` after any
+  change to the `Dockerfile`, the CLI options, logging messages it checks, or shutdown code.
+- Keep `.github/workflows/ci.yml` green on every OS and Python version in the matrix; never
+  remove a matrix entry or mark a job `continue-on-error` to hide a failure.
+- Validate changes with `actionlint` (workflow), `hadolint` (Dockerfile) and `shellcheck`
+  (scripts) when they are available.
+- Performance figures in the README must state how they were measured (tool, requests,
+  clients, pipeline, environment) and be described as indicative.
+- Benchmark code must not require tools beyond the standard library and MiniKV.
 
 ## Commit Conventions
 

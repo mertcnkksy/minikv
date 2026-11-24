@@ -1,11 +1,16 @@
 # MiniKV
 
+[![CI](https://github.com/<your-username>/minikv/actions/workflows/ci.yml/badge.svg)](https://github.com/<your-username>/minikv/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+![Dependencies](https://img.shields.io/badge/runtime%20dependencies-none-brightgreen)
+
 **MiniKV** is a lightweight, Redis-inspired key-value database written in pure Python 3.12.
 It speaks the Redis protocol (RESP2), so `redis-cli`, `redis-benchmark`, and Redis client libraries
 can talk to it directly, and it persists data to disk with snapshots and an append-only file. It is built as a learning-oriented yet production-minded project: a small
 core with clean module boundaries, full type hints, and a thorough test suite.
 
-> **Status:** `v0.4.0` — Phase 4 (persistence). Not intended for production use.
+> **Status:** `v0.5.0` — all five roadmap phases complete. A learning project; not intended for production use.
 
 ## Features
 
@@ -21,6 +26,9 @@ core with clean module boundaries, full type hints, and a thorough test suite.
   whose last command was cut off by a crash
 - **Graceful shutdown** on `SIGINT`/`SIGTERM`, connection limits, and protocol-level safety limits
 - **Deterministic time** via an injectable clock, making expiry fully testable without `sleep`
+- **Ready to ship:** multi-stage Docker image (non-root, health check, graceful `docker stop`),
+  Docker Compose file, and a CI pipeline testing Linux, macOS and Windows on Python 3.12 and 3.13
+- **Built-in benchmark tool** (`minikv benchmark`) and a script comparing persistence modes
 - **Zero runtime dependencies** — standard library only
 
 ## Requirements
@@ -39,7 +47,37 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-### 1. Run the server
+### With Docker
+
+```bash
+docker build -t minikv .
+docker run -d --name minikv -p 6380:6380 -v minikv-data:/data minikv
+docker exec -it minikv minikv connect          # interactive shell inside the container
+docker stop minikv                             # graceful: AOF fsynced, final snapshot written
+```
+
+Or with Docker Compose:
+
+```bash
+docker compose up -d
+docker compose down          # data stays in the minikv-data volume
+```
+
+The image runs as an unprivileged `minikv` user, stores data in the `/data` volume, enables the
+append-only file by default, and reports its health with `minikv connect PING`. Arguments after
+the image name replace the default server options:
+
+```bash
+docker run -d -p 6380:6380 -v minikv-data:/data minikv --appendonly --appendfsync always
+docker run -d -p 6380:6380 minikv --save ""     # purely in memory
+```
+
+Tagged releases are published to the GitHub Container Registry by CI:
+`docker pull ghcr.io/<your-username>/minikv:latest`.
+
+### From source
+
+#### 1. Run the server
 
 ```bash
 minikv serve --dir data --appendonly     # listens on 127.0.0.1:6380, data in ./data
@@ -70,7 +108,7 @@ can intercept. To stop a MiniKV process started from Python on Windows, start it
 append-only file enabled, even a forceful kill loses at most the writes not yet fsynced
 (about one second with `everysec`).
 
-### 2. Connect with the built-in client
+#### 2. Connect with the built-in client
 
 ```bash
 minikv connect
@@ -97,7 +135,7 @@ Run a single command and exit (useful in scripts; the exit code is `1` on errors
 minikv connect GET user:1
 ```
 
-### 3. …or use any Redis tool
+#### 3. …or use any Redis tool
 
 ```bash
 redis-cli -p 6380 SET greeting "hello world"
@@ -116,7 +154,7 @@ print(r.get("token"), r.ttl("token"))        # abc123 60
 > MiniKV speaks RESP2. Recent `redis-py` versions try RESP3 first and fall back automatically,
 > printing a notice; pass `protocol=2` to skip the negotiation.
 
-### Embedded mode
+#### Embedded mode
 
 Without a server, `minikv` starts a shell on an in-process database (data lives only in that process):
 
@@ -131,6 +169,7 @@ minikv
 | `minikv`                        | Interactive shell on an embedded database           |
 | `minikv serve [options]`        | Run the TCP server                                  |
 | `minikv connect [options] [cmd]`| Shell connected to a server, or run one command     |
+| `minikv benchmark [options]`    | Measure throughput and latency of a server          |
 | `minikv --version`              | Print the version                                   |
 
 `serve` options:
@@ -149,6 +188,7 @@ minikv
 | `--appendfsync`      | `everysec`                 | `always`, `everysec` or `no`                        |
 
 `connect` options: `--host`, `-p/--port`, `--no-banner`.
+`benchmark` options: see [Performance](#performance).
 
 ## Commands
 
@@ -281,7 +321,7 @@ except MiniKVError as exc:
     print(exc)                                      # ERR value is not an integer or out of range
 ```
 
-Network client:
+Network client, with pipelining:
 
 ```python
 from minikv.client import MiniKVClient
@@ -289,6 +329,8 @@ from minikv.client import MiniKVClient
 with MiniKVClient(port=6380) as client:
     client.execute("SET", "greeting", "hello")
     print(client.execute("GET", "greeting"))       # hello
+    print(client.pipeline([["SET", "a", "1"], ["GET", "a"], ["BOGUS"]]))
+    # [SimpleString(value='OK'), '1', ReplyError("unknown command 'BOGUS', ...")]
 ```
 
 Server inside your own asyncio application:
@@ -342,7 +384,8 @@ src/minikv/
 ├── constants.py         # Default host and port
 ├── engine.py            # Database: dispatches commands, runs active expiry
 ├── clock.py             # Clock protocol, SystemClock, ManualClock
-├── client.py            # Blocking RESP client
+├── client.py            # Blocking RESP client with pipelining
+├── benchmark.py         # Load generator behind `minikv benchmark`
 ├── errors.py            # Exception hierarchy (MiniKVError and subclasses)
 ├── responses.py         # Wire-format-agnostic reply types
 ├── commands/
@@ -420,9 +463,10 @@ TTL changes are skipped and periodically compacted.
 
 ## Performance
 
-Indicative numbers from `redis-benchmark` against MiniKV on CPython 3.12 inside a small container
-(20 clients, persistence disabled). Real Redis is far faster; these numbers are a baseline. See
-[Persistence](#persistence) for the cost of each fsync policy.
+All numbers below are indicative: they were measured on CPython 3.12 inside a small container,
+and real Redis is far faster. Use them to compare MiniKV configurations, not as absolute figures.
+
+**Server capacity**, measured with `redis-benchmark` (a C client), persistence disabled, 20 clients:
 
 | Test | No pipelining | Pipeline of 16 |
 |------|---------------|----------------|
@@ -430,10 +474,40 @@ Indicative numbers from `redis-benchmark` against MiniKV on CPython 3.12 inside 
 | GET  | ~59,000 req/s | ~110,000 req/s |
 | PING | ~55,000 req/s | —              |
 
+**Built-in benchmark.** `minikv benchmark` needs nothing but MiniKV, so it also works on Windows
+and inside the container. Its clients are Python threads, so it reports lower numbers than
+`redis-benchmark` for the same server.
+
 ```bash
-redis-benchmark -p 6380 -t ping,set,get -n 20000 -c 20 -q
-redis-benchmark -p 6380 -t set,get -n 100000 -c 20 -P 16 -q
+minikv benchmark -n 100000 -c 10                # PING, SET and GET
+minikv benchmark -n 100000 -P 16 -t set,get     # pipelined
+minikv benchmark --json                         # machine-readable output
 ```
+
+```text
+Test  Requests  Clients  Pipeline   Req/s  p50 ms  p95 ms  p99 ms  max ms  Errors
+----  --------  -------  --------  ------  ------  ------  ------  ------  ------
+PING    20,000       10         1  23,175   0.384   0.596   1.932   4.820       0
+SET     20,000       10         1  25,699   0.379   0.539   0.633   1.340       0
+GET     20,000       10         1  29,299   0.338   0.472   0.530   1.248       0
+```
+
+**Persistence modes**, compared by `benchmarks/run_benchmarks.py` (10,000 requests, 10 clients):
+
+| Mode           | SET, no pipeline | SET, pipeline 16 | GET, no pipeline |
+|----------------|-----------------:|-----------------:|-----------------:|
+| In memory      | ~24,000 req/s    | ~63,000 req/s    | ~25,000 req/s    |
+| AOF `everysec` | ~17,000 req/s    | ~36,000 req/s    | ~26,000 req/s    |
+| AOF `always`   | ~4,000 req/s     | ~5,000 req/s     | ~23,000 req/s    |
+
+Reads cost the same in every mode because they are never logged. Writes pay for durability, and
+with `always` pipelining barely helps: see [Known Limitations](#known-limitations).
+
+```bash
+python benchmarks/run_benchmarks.py --requests 20000 --pipelines 1,16 --output results.md
+```
+
+CI runs this comparison on every push and attaches the table to the workflow summary.
 
 ## Development
 
@@ -441,6 +515,15 @@ redis-benchmark -p 6380 -t set,get -n 100000 -c 20 -P 16 -q
 pytest                                   # full suite
 pytest tests/test_server.py -v           # one module
 ```
+
+`pytest` covers the library, the server and the CLI. The repository also contains:
+
+| Path                           | Purpose                                                        |
+|--------------------------------|----------------------------------------------------------------|
+| `.github/workflows/ci.yml`     | CI: tests on Linux/macOS/Windows × Python 3.12/3.13, Redis compatibility, Docker smoke test, benchmarks, image publishing on tags |
+| `scripts/docker_smoke_test.sh` | Builds nothing; tests an image end to end (`bash scripts/docker_smoke_test.sh minikv`) |
+| `benchmarks/run_benchmarks.py` | Compares persistence modes                                     |
+| `Dockerfile`, `docker-compose.yml` | Container image and local deployment                        |
 
 The suite includes real-socket integration tests, end-to-end tests that start real server
 processes, stop them gracefully and restart them to verify that data survives, and crash-recovery
@@ -459,7 +542,7 @@ for release history.
 | 2     | 0.2.0   | ✅ Key expiry: `EXPIRE`, `TTL`, `SET ... EX`, active expiration |
 | 3     | 0.3.0   | ✅ TCP server speaking RESP2, compatible with `redis-cli`       |
 | 4     | 0.4.0   | ✅ Persistence: snapshots and append-only file                  |
-| 5     | 0.5.0   | Docker image, CI pipeline, benchmarks                          |
+| 5     | 0.5.0   | ✅ Docker image, CI pipeline, benchmarks                        |
 
 ## Known Limitations
 
@@ -469,6 +552,9 @@ for release history.
   extra memory proportional to the number of keys. Redis avoids this with `fork()` and copy-on-write.
 - Snapshots are read fully into memory when loading, and `KEYS` scans the whole keyspace.
 - Python's GIL means background threads share the CPU with the event loop.
+- With `--appendfsync always`, MiniKV fsyncs after every write command. Redis groups the writes
+  of one event-loop iteration into a single fsync ("group commit"), so pipelined writes are much
+  cheaper there; the benchmark above shows the cost of not doing so.
 
 ## Contributing
 

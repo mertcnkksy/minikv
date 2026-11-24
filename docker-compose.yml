@@ -1,0 +1,18 @@
+# docker compose up -d       start MiniKV with persistent storage
+# docker compose down        stop it gracefully (data is kept in the volume)
+services:
+  minikv:
+    build: .
+    image: minikv:0.5.0
+    container_name: minikv
+    ports:
+      - "6380:6380"
+    volumes:
+      - minikv-data:/data
+    command: ["--appendonly", "--appendfsync", "everysec"]
+    restart: unless-stopped
+    # Time allowed for the final fsync and snapshot before Docker kills the server.
+    stop_grace_period: 30s
+
+volumes:
+  minikv-data:

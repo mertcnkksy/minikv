@@ -12,6 +12,7 @@ Example:
 from __future__ import annotations
 
 import socket
+from collections.abc import Sequence
 from types import TracebackType
 
 from minikv.constants import DEFAULT_HOST, DEFAULT_PORT
@@ -94,21 +95,49 @@ class MiniKVClient:
         """
         if not command:
             raise ValueError("a command is required")
+        (reply,) = self._round_trip([command])
+        if isinstance(reply, ReplyError):
+            raise reply
+        return reply
+
+    def pipeline(self, commands: Sequence[Sequence[str]]) -> list[Response | ReplyError]:
+        """Send several commands in one write and return every reply in order.
+
+        Pipelining saves one network round trip per command. Error replies
+        are returned as :class:`~minikv.errors.ReplyError` values instead of
+        being raised, so one failing command does not hide the others.
+
+        Args:
+            commands: The commands to send, each a sequence of strings.
+
+        Returns:
+            One reply per command, in the same order.
+
+        Raises:
+            ConnectionError: If the connection failed or was closed.
+            ValueError: If any command is empty.
+        """
+        if any(not command for command in commands):
+            raise ValueError("pipeline commands must not be empty")
+        if not commands:
+            return []
+        return self._round_trip(commands)
+
+    def _round_trip(self, commands: Sequence[Sequence[str]]) -> list[Response | ReplyError]:
+        """Write ``commands`` and read one reply for each."""
         self.connect()
         assert self._sock is not None
         try:
-            self._sock.sendall(encode_command(command))
-            reply = self._read_reply()
+            self._sock.sendall(b"".join(encode_command(command) for command in commands))
+            replies = [self._read_reply() for _ in commands]
         except OSError as exc:
             self.close()
             if isinstance(exc, ConnectionError):
                 raise
             raise ConnectionError(f"connection to {self.host}:{self.port} failed: {exc}") from exc
-        if command[0].upper() == "QUIT":
+        if any(command[0].upper() == "QUIT" for command in commands):
             self.close()  # the server closes its side; reconnect on next command
-        if isinstance(reply, ReplyError):
-            raise reply
-        return reply
+        return replies
 
     def _read_reply(self) -> Response | ReplyError:
         assert self._sock is not None

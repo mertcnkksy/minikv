@@ -174,6 +174,12 @@ def test_parser_rejects_bad_save_rules(rules: str) -> None:
     assert info.value.code == 2
 
 
+def test_parser_benchmark_defaults() -> None:
+    args = build_parser().parse_args(["benchmark"])
+    assert (args.mode, args.requests, args.clients, args.pipeline) == ("benchmark", 10_000, 10, 1)
+    assert args.tests == ("PING", "SET", "GET") and not args.json
+
+
 def test_parser_connect_options() -> None:
     args = build_parser().parse_args(["connect", "-p", "7001", "SET", "k", "v"])
     assert (args.mode, args.port, args.command) == ("connect", 7001, ["SET", "k", "v"])

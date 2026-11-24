@@ -1,0 +1,23 @@
+# Only pyproject.toml, README.md and src/ are needed to build the image.
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+build
+dist
+tests
+benchmarks
+scripts
+data
+*.mkv
+*.aof
+*.rdb
+benchmark-results.*
+Dockerfile
+docker-compose.yml

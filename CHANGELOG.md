@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - Phase 5: Docker, CI and Benchmarks
+
+### Added
+
+- Multi-stage `Dockerfile`: virtual environment built in a separate stage, unprivileged
+  `minikv` user, `/data` volume, health check using `minikv connect PING`, AOF enabled by
+  default, and graceful `docker stop` through `SIGTERM`. The base image is configurable
+  with the `PYTHON_IMAGE` build argument.
+- `docker-compose.yml` with a named volume and a 30 s stop grace period, and `.dockerignore`.
+- `scripts/docker_smoke_test.sh`: end-to-end image test (non-root user, health check,
+  reads and writes, graceful stop with exit code 0, data surviving a new container).
+- GitHub Actions workflow: tests on Linux, macOS and Windows with Python 3.12 and 3.13;
+  mandatory `redis-cli`/`redis-py` compatibility tests; Docker build and smoke test;
+  benchmark comparison in the job summary; image publishing to GHCR on `v*` tags.
+- `minikv benchmark`: standard-library load generator reporting throughput and
+  p50/p95/p99/max latency, with pipelining and JSON output.
+- `minikv.benchmark` module (`BenchmarkConfig`, `BenchmarkResult`, `run_benchmark`).
+- `MiniKVClient.pipeline()` to send many commands in one round trip; error replies are
+  returned as values.
+- `benchmarks/run_benchmarks.py` comparing in-memory, AOF `everysec` and AOF `always`.
+- Python 3.13 and OS-independence classifiers.
+
 ## [0.4.0] - Phase 4: Persistence
 
 ### Added

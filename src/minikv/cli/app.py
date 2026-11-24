@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from minikv import __version__
+from minikv.benchmark import SUPPORTED_TESTS, BenchmarkConfig, format_results, run_benchmark
 from minikv.cli.formatting import format_error, format_response
 from minikv.cli.repl import Repl
 from minikv.client import MiniKVClient
@@ -31,6 +32,7 @@ examples:
   minikv serve --save ""              pure in-memory server, nothing written to disk
   minikv connect                      shell connected to the server
   minikv connect SET greeting hello   run one command and exit
+  minikv benchmark -n 100000 -P 16    measure throughput and latency
   redis-cli -p {DEFAULT_PORT} PING                 any Redis client works too
 """
 
@@ -55,6 +57,29 @@ def _positive_int(value: str) -> int:
     if number < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
     return number
+
+
+def _non_negative_int(value: str) -> int:
+    """argparse type for integers >= 0."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid integer: {value!r}") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError("must not be negative")
+    return number
+
+
+def _bench_tests(value: str) -> tuple[str, ...]:
+    """argparse type for ``ping,set,get``-style test lists."""
+    tests = tuple(part.strip().upper() for part in value.split(",") if part.strip())
+    unknown = [test for test in tests if test not in SUPPORTED_TESTS]
+    if unknown or not tests:
+        raise argparse.ArgumentTypeError(
+            f"unknown tests: {', '.join(unknown) or '(none)'}; "
+            f"choose from {', '.join(t.lower() for t in SUPPORTED_TESTS)}"
+        )
+    return tests
 
 
 def _save_rules(value: str) -> tuple[tuple[int, int], ...]:
@@ -82,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--no-banner", action="store_true", help="do not print the welcome banner")
-    modes = parser.add_subparsers(dest="mode", metavar="{serve,connect}")
+    modes = parser.add_subparsers(dest="mode", metavar="{serve,connect,benchmark}")
 
     serve = modes.add_parser("serve", help="run the MiniKV TCP server")
     serve.add_argument("--host", default=DEFAULT_HOST,
@@ -118,6 +143,24 @@ def build_parser() -> argparse.ArgumentParser:
                          help="do not print the welcome banner")
     connect.add_argument("command", nargs=argparse.REMAINDER,
                          help="run this command once and exit instead of starting a shell")
+
+    bench = modes.add_parser("benchmark", help="measure the throughput and latency of a server")
+    bench.add_argument("--host", default=DEFAULT_HOST, help=f"server host (default: {DEFAULT_HOST})")
+    bench.add_argument("-p", "--port", type=_port, default=DEFAULT_PORT,
+                       help=f"server port (default: {DEFAULT_PORT})")
+    bench.add_argument("-n", "--requests", type=_positive_int, default=10_000,
+                       help="total requests per test (default: 10000)")
+    bench.add_argument("-c", "--clients", type=_positive_int, default=10,
+                       help="parallel connections (default: 10)")
+    bench.add_argument("-P", "--pipeline", type=_positive_int, default=1,
+                       help="requests per round trip (default: 1)")
+    bench.add_argument("-d", "--data-size", type=_non_negative_int, default=3,
+                       help="SET value size in bytes (default: 3)")
+    bench.add_argument("-r", "--keyspace", type=_positive_int, default=10_000,
+                       help="number of distinct keys (default: 10000)")
+    bench.add_argument("-t", "--tests", type=_bench_tests, default=SUPPORTED_TESTS,
+                       help="comma-separated tests (default: ping,set,get)")
+    bench.add_argument("--json", action="store_true", help="print results as JSON")
     return parser
 
 
@@ -184,6 +227,33 @@ def _run_connect(args: argparse.Namespace) -> int:
         ).run()
 
 
+def _run_benchmark(args: argparse.Namespace) -> int:
+    import json
+
+    config = BenchmarkConfig(
+        host=args.host, port=args.port, requests=args.requests, clients=args.clients,
+        pipeline=args.pipeline, data_size=args.data_size, keyspace=args.keyspace,
+        tests=args.tests,
+    )
+    if not args.json:
+        print(f"Benchmarking MiniKV at {args.host}:{args.port} "
+              f"({args.requests:,} requests, {args.clients} clients, pipeline {args.pipeline})...")
+    try:
+        results = run_benchmark(config)
+    except ConnectionError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([result.to_dict() for result in results], indent=2))
+    else:
+        print(format_results(results))
+    errors = sum(result.errors for result in results)
+    if errors:
+        print(f"{errors} request(s) failed", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the ``minikv`` command.
 
@@ -198,5 +268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_serve(args)
     if args.mode == "connect":
         return _run_connect(args)
+    if args.mode == "benchmark":
+        return _run_benchmark(args)
     _enable_line_editing()
     return Repl(Database(), show_banner=not args.no_banner).run()
